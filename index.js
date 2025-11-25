@@ -19,8 +19,8 @@ db.run(`
   );
 `);
 
-app.use(cors());               // Разрешаем запросы с других доменов (Flutter-приложение)
-app.use(express.json());       // Позволяет читать JSON из тела запроса
+app.use(cors());
+app.use(express.json());
 
 // Простая проверка email/телефон — примерно как во Flutter
 function isValidEmail(str) {
@@ -37,15 +37,15 @@ app.post('/register', async (req, res) => {
   const { identifier, password, name } = req.body || {};
 
   if (!identifier || !password) {
-    return res.status(400).json({ message: 'identifier и password обязательны' });
+    return res.status(400).json({ success: false, message: 'identifier и password обязательны' });
   }
 
   if (!(isValidEmail(identifier) || isValidPhone(identifier))) {
-    return res.status(400).json({ message: 'Некорректный email или телефон' });
+    return res.status(400).json({ success: false, message: 'Некорректный email или телефон' });
   }
 
   if (password.length < 6) {
-    return res.status(400).json({ message: 'Пароль слишком короткий' });
+    return res.status(400).json({ success: false, message: 'Пароль слишком короткий' });
   }
 
   try {
@@ -57,14 +57,14 @@ app.post('/register', async (req, res) => {
       function (err) {
         if (err) {
           if (err.message && err.message.includes('UNIQUE')) {
-            return res.status(409).json({ message: 'Такой пользователь уже существует' });
+            return res.status(409).json({ success: false, message: 'Такой пользователь уже существует' });
           }
           console.error(err);
-          return res.status(500).json({ message: 'Ошибка сервера' });
+          return res.status(500).json({ success: false, message: 'Ошибка сервера' });
         }
 
         return res.status(200).json({
-          ok: true,
+          success: true,
           message: 'Регистрация успешна',
           userId: this.lastID,
         });
@@ -72,7 +72,7 @@ app.post('/register', async (req, res) => {
     );
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ message: 'Ошибка сервера' });
+    return res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
 
@@ -81,7 +81,7 @@ app.post('/login', (req, res) => {
   const { identifier, password } = req.body || {};
 
   if (!identifier || !password) {
-    return res.status(400).json({ message: 'identifier и password обязательны' });
+    return res.status(400).json({ success: false, message: 'identifier и password обязательны' });
   }
 
   db.get(
@@ -90,20 +90,20 @@ app.post('/login', (req, res) => {
     async (err, row) => {
       if (err) {
         console.error(err);
-        return res.status(500).json({ message: 'Ошибка сервера' });
+        return res.status(500).json({ success: false, message: 'Ошибка сервера' });
       }
 
       if (!row) {
-        return res.status(401).json({ message: 'Неверный логин или пароль' });
+        return res.status(401).json({ success: false, message: 'Неверный логин или пароль' });
       }
 
       const match = await bcrypt.compare(password, row.password_hash);
       if (!match) {
-        return res.status(401).json({ message: 'Неверный логин или пароль' });
+        return res.status(401).json({ success: false, message: 'Неверный логин или пароль' });
       }
 
       return res.status(200).json({
-        ok: true,
+        success: true,
         message: 'Вход выполнен успешно',
         userId: row.id,
       });
