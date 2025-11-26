@@ -1,108 +1,114 @@
+// index.js
 const express = require('express');
 const cors = require('cors');
-const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
+const bcrypt = require('bcrypt');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// --- Подключаем SQLite (файл users.db лежит рядом с index.js) ---
-const db = new sqlite3.Database('./users.db');
-
-// Создаём таблицу пользователей (если её ещё нет)
-db.run(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    identifier TEXT UNIQUE NOT NULL,
-    name TEXT,
-    password_hash TEXT NOT NULL
-  );
-`);
-
+// ---------- МИДЛВАРЫ ----------
 app.use(cors());
 app.use(express.json());
 
-// Простая проверка email/телефон — примерно как во Flutter
-function isValidEmail(str) {
-  return /^[\w.\-]+@[\w.\-]+\.\w+$/.test(str);
+// ---------- БАЗА ДАННЫХ ----------
+const db = new sqlite3.Database('./users.db');
+
+// Таблица пользователей.
+// provider = 'local' | 'google' | 'apple' ...
+// для local/password: providerId = identifier
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      identifier TEXT NOT NULL,   -- email или телефон
+      passwordHash TEXT,          -- для local
+      name TEXT,
+      provider TEXT NOT NULL DEFAULT 'local',
+      providerId TEXT,
+      UNIQUE(provider, providerId)
+    )
+  `);
+});
+
+// ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+function sendError(res, message, code = 400) {
+  res.status(code).json({ success: false, message });
 }
 
-function isValidPhone(str) {
-  const cleaned = str.replace(/[\s\-+()]/g, '');
-  return /^\d{9,15}$/.test(cleaned);
-}
+// ---------- ПРОСТО ПРОВЕРКА, ЧТО СЕРВЕР ЖИВОЙ ----------
+app.get('/', (req, res) => {
+  res.json({ ok: true, message: 'Agronom Online auth server' });
+});
 
-// ------------- РЕГИСТРАЦИЯ -------------
+// ---------- РЕГИСТРАЦИЯ (email / телефон + пароль) ----------
 app.post('/register', async (req, res) => {
   const { identifier, password, name } = req.body || {};
 
-  if (!identifier || !password) {
-    return res.status(400).json({ success: false, message: 'identifier и password обязательны' });
-  }
-
-  if (!(isValidEmail(identifier) || isValidPhone(identifier))) {
-    return res.status(400).json({ success: false, message: 'Некорректный email или телефон' });
-  }
-
-  if (password.length < 6) {
-    return res.status(400).json({ success: false, message: 'Пароль слишком короткий' });
+  if (!identifier || !password || !name) {
+    return sendError(res, 'Не хватает данных (identifier, password, name)', 400);
   }
 
   try {
-    const hash = await bcrypt.hash(password, 10);
+    const saltRounds = 10;
+    const hash = await bcrypt.hash(password, saltRounds);
 
-    db.run(
-      'INSERT INTO users (identifier, name, password_hash) VALUES (?, ?, ?)',
-      [identifier, name || null, hash],
-      function (err) {
-        if (err) {
-          if (err.message && err.message.includes('UNIQUE')) {
-            return res.status(409).json({ success: false, message: 'Такой пользователь уже существует' });
-          }
-          console.error(err);
-          return res.status(500).json({ success: false, message: 'Ошибка сервера' });
+    const stmt = db.prepare(`
+      INSERT INTO users (identifier, passwordHash, name, provider, providerId)
+      VALUES (?, ?, ?, 'local', ?)
+    `);
+
+    stmt.run(identifier, hash, name, identifier, function (err) {
+      if (err) {
+        if (err.code === 'SQLITE_CONSTRAINT') {
+          return sendError(res, 'Такой пользователь уже существует', 409);
         }
-
-        return res.status(200).json({
-          success: true,
-          message: 'Регистрация успешна',
-          userId: this.lastID,
-        });
+        console.error('Ошибка при INSERT /register:', err);
+        return sendError(res, 'Внутренняя ошибка сервера', 500);
       }
-    );
+
+      res.json({
+        success: true,
+        message: 'Регистрация успешна',
+        userId: this.lastID,
+      });
+    });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ success: false, message: 'Ошибка сервера' });
+    console.error('Ошибка /register:', e);
+    return sendError(res, 'Внутренняя ошибка сервера', 500);
   }
 });
 
-// ------------- ВХОД -------------
+// ---------- ВХОД (email / телефон + пароль) ----------
 app.post('/login', (req, res) => {
   const { identifier, password } = req.body || {};
 
   if (!identifier || !password) {
-    return res.status(400).json({ success: false, message: 'identifier и password обязательны' });
+    return sendError(res, 'Не хватает данных (identifier, password)', 400);
   }
 
   db.get(
-    'SELECT * FROM users WHERE identifier = ?',
+    `
+    SELECT * FROM users
+    WHERE provider = 'local' AND identifier = ?
+  `,
     [identifier],
     async (err, row) => {
       if (err) {
-        console.error(err);
-        return res.status(500).json({ success: false, message: 'Ошибка сервера' });
+        console.error('Ошибка SELECT /login:', err);
+        return sendError(res, 'Внутренняя ошибка сервера', 500);
       }
 
-      if (!row) {
-        return res.status(401).json({ success: false, message: 'Неверный логин или пароль' });
+      if (!row || !row.passwordHash) {
+        return sendError(res, 'Неверный логин или пароль', 401);
       }
 
-      const match = await bcrypt.compare(password, row.password_hash);
-      if (!match) {
-        return res.status(401).json({ success: false, message: 'Неверный логин или пароль' });
+      const isOk = await bcrypt.compare(password, row.passwordHash);
+      if (!isOk) {
+        return sendError(res, 'Неверный логин или пароль', 401);
       }
 
-      return res.status(200).json({
+      res.json({
         success: true,
         message: 'Вход выполнен успешно',
         userId: row.id,
@@ -111,7 +117,61 @@ app.post('/login', (req, res) => {
   );
 });
 
-// ------------- СТАРТ СЕРВЕРА -------------
+// ---------- ВХОД/РЕГИСТРАЦИЯ ЧЕРЕЗ GOOGLE ----------
+app.post('/auth/google', (req, res) => {
+  const { googleId, email, name } = req.body || {};
+
+  if (!googleId || !email) {
+    return sendError(res, 'Не хватает данных googleId / email', 400);
+  }
+
+  // Ищем пользователя по связке provider + providerId
+  db.get(
+    `
+    SELECT * FROM users
+    WHERE provider = 'google' AND providerId = ?
+  `,
+    [googleId],
+    (err, row) => {
+      if (err) {
+        console.error('Ошибка SELECT /auth/google:', err);
+        return sendError(res, 'Внутренняя ошибка сервера', 500);
+      }
+
+      if (row) {
+        // Уже есть такой пользователь — просто логин
+        return res.json({
+          success: true,
+          message: 'Вход через Google выполнен',
+          userId: row.id,
+        });
+      }
+
+      // Если нет — создаём нового
+      const insert = db.prepare(`
+        INSERT INTO users (identifier, passwordHash, name, provider, providerId)
+        VALUES (?, NULL, ?, 'google', ?)
+      `);
+
+      insert.run(email, name || '', googleId, function (err2) {
+        if (err2) {
+          console.error('Ошибка INSERT /auth/google:', err2);
+          return sendError(res, 'Не удалось создать пользователя Google', 500);
+        }
+
+        res.json({
+          success: true,
+          message: 'Пользователь Google создан и вошёл',
+          userId: this.lastID,
+        });
+      });
+    }
+  );
+});
+
+// ---------- ЗАПУСК СЕРВЕРА ----------
+const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Сервер работает на порту ${PORT}`);
 });
