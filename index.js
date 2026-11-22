@@ -20,7 +20,11 @@ const googleClient = new OAuth2Client();
 app.use(cors());
 app.use(express.json());
 
-const db = new sqlite3.Database('./users.db');
+const databasePath = process.env.DB_PATH || './users.db';
+if (process.env.DB_PATH) {
+  require('node:fs').mkdirSync(require('node:path').dirname(require('node:path').resolve(databasePath)), { recursive: true });
+}
+const db = new sqlite3.Database(databasePath);
 
 function ensureColumn(columnNames, name, sql) {
   if (!columnNames.includes(name)) {
@@ -603,6 +607,13 @@ app.post('/auth/google', async (req, res) => {
     return sendError(res, 'Google auth failed', 500);
   }
 });
+
+const billingDbAll = (sql, params) => new Promise((resolve, reject) =>
+  db.all(sql, params, (error, rows) => error ? reject(error) : resolve(rows)));
+require('./billing').registerBilling(app, { dbGet, dbRun, dbAll: billingDbAll });
+app.get('/account-deletion', (_, res) => res.sendFile(require('node:path').join(__dirname, 'public', 'account-deletion.html')));
+app.get('/privacy-policy', (_, res) => res.sendFile(require('node:path').join(__dirname, 'public', 'privacy-policy.html')));
+app.get('/terms-of-use', (_, res) => res.sendFile(require('node:path').join(__dirname, 'public', 'terms-of-use.html')));
 
 app.listen(PORT, () => {
   if (!process.env.JWT_SECRET && process.env.NODE_ENV !== 'production') {
