@@ -19,10 +19,28 @@ function identityFailureReason(error) {
     'auth/id-token-revoked': 'firebase_token_revoked',
     'auth/invalid-credential': 'firebase_credentials_invalid',
     'auth/invalid-argument': 'firebase_token_invalid',
+    'auth/argument-error': 'firebase_token_format_invalid',
+    'auth/internal-error': 'firebase_internal_error',
+    'auth/network-request-failed': 'firebase_certificate_network_error',
+    'app/invalid-app-options': 'firebase_app_configuration_invalid',
     'app/invalid-credential': 'firebase_credentials_invalid',
     'app/network-error': 'firebase_certificate_network_error',
   };
   return codes[error?.code] || 'firebase_verification_failed';
+}
+
+function identityTokenShape(token) {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3) return { jwt: false };
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+    return { jwt: true, rs256: header.alg === 'RS256', keyPresent: typeof header.kid === 'string',
+      expectedAudience: payload.aud === projectId,
+      expectedIssuer: payload.iss === `https://securetoken.google.com/${projectId}`,
+      subjectPresent: typeof payload.sub === 'string' && payload.sub.length > 0,
+      unexpired: typeof payload.exp === 'number' && payload.exp > Date.now() / 1000 };
+  } catch (_) { return { jwt: false }; }
 }
 
 function entitlement(purchase, now = Date.now()) {
@@ -73,15 +91,19 @@ function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
   app.get('/billing/status', async (_, res) => res.json({ billingReady: await catalogReady(),
     productId, identityProvider: 'firebase', firebaseProjectId: projectId, billingApiVersion: 2 }));
   async function authenticate(req, res, next) {
+    let token;
     try {
       const bearer = /^Bearer (\S+)$/.exec(String(req.headers.authorization || ''));
       if (!bearer || bearer[1].length > 16384) throw new Error('Invalid bearer');
+      token = bearer[1];
       const claims = await verifyFirebaseToken(bearer[1]);
       if (typeof claims.uid !== 'string' || !claims.uid || claims.uid.length > 128) throw new Error('Invalid Firebase identity');
       req.billingUser = claims.uid;
+      console.info('[BillingIdentity] verified');
       next();
     } catch (error) {
-      console.warn('[BillingIdentity]', identityFailureReason(error));
+      const errorType = ['TypeError', 'RangeError', 'SyntaxError'].includes(error.name) ? error.name : 'Error';
+      console.warn('[BillingIdentity]', identityFailureReason(error), errorType, JSON.stringify(identityTokenShape(token)));
       res.status(401).json({ error: 'Sign in required' });
     }
   }
@@ -176,4 +198,4 @@ function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
     return handle(req, res, req.body.purchaseToken);
   });
 }
-module.exports = { registerBilling, entitlement, accountId, identityFailureReason };
+module.exports = { registerBilling, entitlement, accountId, identityFailureReason, identityTokenShape };
