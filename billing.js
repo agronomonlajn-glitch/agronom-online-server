@@ -175,6 +175,7 @@ function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
     try {
       const verified = token ? await verify(token, req.billingUser) : null;
       const result = verified?.active ? verified : await latest(req.billingUser);
+      console.info('[BillingPurchase]', token ? 'receipt' : 'status', result.active ? 'active' : 'inactive');
       return res.json({ ...result, billingReady: await catalogReady(), productId,
         identityProvider: 'firebase', firebaseProjectId: projectId, billingApiVersion: 2,
         receiptVerified: Boolean(token && verified?.active && verified?.acknowledged),
@@ -183,10 +184,22 @@ function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
     } catch (error) {
       // Never include raw Google errors or receipt tokens in logs/responses.
       const googleStatus = error.response?.status;
+      const safeStatus = Number.isInteger(googleStatus) ? googleStatus : null;
+      const storageCode = ['SQLITE_ERROR', 'SQLITE_READONLY', 'SQLITE_CANTOPEN', 'SQLITE_BUSY'].includes(error.code) ? error.code : null;
+      console.warn('[BillingPurchase] failed', JSON.stringify({ googleStatus: safeStatus, storageCode,
+        ownershipConflict: !googleStatus && error.status === 409 }));
       if (googleStatus === 404 || googleStatus === 410) {
         return res.status(400).json({ error: 'Purchase not found' });
       }
-      return res.status(error.status || 503).json({ error: error.status ? error.message : 'Purchase verification temporarily unavailable' });
+      // A Google API 401 is a SERVER credential failure, never a Firebase login failure.
+      // Do not forward Google messages, which may contain purchase identifiers.
+      if (!googleStatus && error.status === 409) {
+        return res.status(409).json({ error: 'Purchase belongs to another account' });
+      }
+      if (!googleStatus && error.status === 400) {
+        return res.status(400).json({ error: 'Unexpected subscription product' });
+      }
+      return res.status(503).json({ error: 'Purchase verification temporarily unavailable' });
     }
   }
   app.get('/billing/entitlement', authenticate, (req, res) => handle(req, res));
