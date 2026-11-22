@@ -55,6 +55,8 @@ function entitlement(purchase, now = Date.now()) {
 
 function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
   verifyFirebaseToken = createFirebaseVerifier() }) {
+  // Explicit server-managed review account; never trust a client flag or email.
+  const reviewUid = String(process.env.GOOGLE_PLAY_REVIEW_UID || '').trim();
   let credentials, validConfiguration = true;
   if (process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON) {
     try {
@@ -171,6 +173,14 @@ function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
     return latest;
   }
   async function handle(req, res, token) {
+    if (!token && reviewUid && reviewUid.length <= 128 && req.billingUser === reviewUid) {
+      const now = Date.now();
+      return res.json({ active: true, entitlementSource: 'review_access',
+        expiresAt: new Date(now + 86400000).toISOString(), verifiedAt: new Date(now).toISOString(),
+        billingReady: ready, productId, identityProvider: 'firebase', firebaseProjectId: projectId,
+        billingApiVersion: 2, accountId: accountId(req.billingUser),
+        receiptVerified: false, acknowledged: false, receiptState: null });
+    }
     if (!ready) return res.status(503).json({ billingReady: false, error: 'Billing verification unavailable' });
     try {
       const verified = token ? await verify(token, req.billingUser) : null;
