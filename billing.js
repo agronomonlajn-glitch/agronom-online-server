@@ -7,6 +7,24 @@ const productId = 'agronom_premium_monthly';
 const hash = value => createHash('sha256').update(String(value)).digest('hex');
 const accountId = userId => hash(`agronom:${userId}`);
 
+// Emit only fixed diagnostic labels, never SDK messages or token contents.
+function identityFailureReason(error) {
+  const message = String(error?.message || '');
+  if (message.includes('audience')) return 'firebase_audience_mismatch';
+  if (message.includes('issuer')) return 'firebase_issuer_mismatch';
+  if (message.includes('signature')) return 'firebase_signature_invalid';
+  if (message.includes('kid')) return 'firebase_key_id_invalid';
+  const codes = {
+    'auth/id-token-expired': 'firebase_token_expired',
+    'auth/id-token-revoked': 'firebase_token_revoked',
+    'auth/invalid-credential': 'firebase_credentials_invalid',
+    'auth/invalid-argument': 'firebase_token_invalid',
+    'app/invalid-credential': 'firebase_credentials_invalid',
+    'app/network-error': 'firebase_certificate_network_error',
+  };
+  return codes[error?.code] || 'firebase_verification_failed';
+}
+
 function entitlement(purchase, now = Date.now()) {
   const allowed = ['SUBSCRIPTION_STATE_ACTIVE', 'SUBSCRIPTION_STATE_IN_GRACE_PERIOD',
     'SUBSCRIPTION_STATE_CANCELED'];
@@ -62,7 +80,10 @@ function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
       if (typeof claims.uid !== 'string' || !claims.uid || claims.uid.length > 128) throw new Error('Invalid Firebase identity');
       req.billingUser = claims.uid;
       next();
-    } catch (_) { res.status(401).json({ error: 'Sign in required' }); }
+    } catch (error) {
+      console.warn('[BillingIdentity]', identityFailureReason(error));
+      res.status(401).json({ error: 'Sign in required' });
+    }
   }
   async function verify(token, userId, persist = true) {
     await schema;
@@ -155,4 +176,4 @@ function registerBilling(app, { dbGet, dbRun, dbAll, googleClient,
     return handle(req, res, req.body.purchaseToken);
   });
 }
-module.exports = { registerBilling, entitlement, accountId };
+module.exports = { registerBilling, entitlement, accountId, identityFailureReason };
